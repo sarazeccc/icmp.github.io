@@ -1,0 +1,12 @@
+name: "."
+title: "Sampling Strategy St Clair River"
+description: |
+  Sampling Strategy St Clair River
+output_dir: "docs"
+navbar:
+  right:
+    - text: "Home"
+      href: index.html
+    - text: "About"
+      href: about.html
+output: distill::distill_article

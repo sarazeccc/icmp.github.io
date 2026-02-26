@@ -1,0 +1,21 @@
+{
+  "articles": [
+    {
+      "path": "about.html",
+      "title": "About this site",
+      "description": "Some additional details about the website",
+      "author": [],
+      "contents": "\r\n\r\n\r\n\r\n",
+      "last_modified": "2026-02-26T13:54:31-05:00"
+    },
+    {
+      "path": "index.html",
+      "title": "Sampling Strategy St Clair River",
+      "description": "Welcome to the website. I hope you enjoy it!\n",
+      "author": [],
+      "contents": "\r\n\r\n\r\n\r\n",
+      "last_modified": "2026-02-26T13:54:47-05:00"
+    }
+  ],
+  "collections": []
+}

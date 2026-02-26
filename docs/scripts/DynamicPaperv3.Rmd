@@ -1,0 +1,918 @@
+---
+title: "Sampling strategy for a large, anthropogenically influenced river: Modeling aquatic contaminants for future chemical mixtures impact assessment"
+description: |
+ The goal of this study was to evaluate the potential of entropy-based Bayesian sampling design to optimize contaminant monitoring using existing data from a large Canadian river exposed to multiple anthropogenic stressors. The analysis served as a proof of concept for using historical data to inform site ranking. Our objective was to propose a monitoring network capable of supporting future assessments of chemical mixtures and biodiversity. We applied a probabilistic modeling approach to identify locations that most effectively reduced predictive uncertainty in contaminant concentration, enabling us to 1) prioritize highly informative sites, 2) identify potentially redundant sites that could be merged or excluded to optimize sampling effort and cost, and 3) select site bundles that merit addition. The results guided the development of a new Environment and Climate Change Canada (ECCC) program, the Integrated Chemical Mixtures Program (ICMP), focused on monitoring chemical mixtures and their effects on biota.
+author:
+  - name: Sara Zapata-Marin
+    affiliation: Aquatic Contaminants Research Division, Environment and Climate Change Canada, ECCC, Montréal, QC, Canada and CANN Forecast Logiciel, Inc., Montréal, QC, Canada
+    affiliation_url: https://www.canada.ca/en/environment-climate-change.html
+    orcid_id: 0000-0002-4298-5659
+  - name: Zofia E. Taranu
+    url: https://scholar.google.ca/citations?user=iYHBankAAAAJ&hl=en
+    affiliation: Aquatic Contaminants Research Division, Environment and Climate Change Canada, ECCC, Montréal, QC, Canada
+    affiliation_url: https://www.canada.ca/en/environment-climate-change.html
+    orcid_id: 0000-0002-4137-5058
+  - name: Russell Steele
+    url: https://www.math.mcgill.ca/steele/Site/Home.html
+    affiliation: Mathematics and Statistics Department, McGill University, Montréal, QC, Canada.
+    affiliation_url: https://www.mcgill.ca/mathstat/
+    orcid_id: 0000-0002-4137-5058
+date: "`r Sys.Date()`"
+output:
+  distill::distill_article:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(corrplot)
+library(leaflet)
+library(devtools)
+library(forcats)
+library(geoR)
+library(ggbiplot)
+library(ggfortify)
+library(gstat)
+library(htmltools)
+library(MASS)
+library(MCMCvis)
+library(nimble)
+library(rdist)
+library(sf)
+library(stringr)
+library(sp)
+library(tidyverse)
+library(viridis)
+
+`%notin%` = Negate(`%in%`)
+
+
+source('scripts/functions/sediments_analysis_paper.R')
+```
+
+# Introduction
+
+
+The aim of this project is to inform a strategic sampling process for the ICMP pilot study using historical data from 50 monitoring sites along the St. Clair River from 2014 to evaluate how informative each of the sites is through a Bayesian entropy-based framework following Le and Zidek (2006) and Ainslie et al. (2009).
+
+
+# Methods
+
+## Data
+
+We used sediments data from the Great Lakes Water Quality Agreement. The sampling campaign was conducted from 2014-06-23 to 2014-07-02, for 50 sites along St Clair River with sites on both sides of the border (US and Canada). Collected samples included 319 substances labeled as chemicals of concern under the GLWQA and ICMP. The different substances were grouped into different types such as esters, fungicides, herbicides, insecticides, major ions, metals, physical variables, etc.
+Given the large number of variables in the dataset we decided to analyze O,P'-DDE (2,4'-DDE) using the other substance types as predictors, as they were sampled at the same time and at the same locations.
+
+
+```{r load data, echo = FALSE}
+water_quality <-
+  read.csv('data/Great-Lakes-Sediment-Monitoring-Plan-St-Clair-River-2014 Data.csv')
+monitoring_sites <-
+  read.csv('data/Great-Lakes-Sediment-Monitoring-Plan-Sites.csv')
+substance_types <-
+  read.csv('data/Great-Lakes-Sediment-Monitoring-Plan-VMVs.csv')
+
+```
+
+
+```{r fig.cap="Location of the sampling sites across St. Claire River.", echo = FALSE}
+substances_types_unique <-
+  unique(substance_types[, c('VARIABLE', 'VARIABLE_TYPE')])
+locs_quality <-
+  merge(water_quality, monitoring_sites[, c('SITE_NO', 'LATITUDE', 'LONGITUDE')], by = 'SITE_NO')
+wq_type <-
+  merge(
+    locs_quality,
+    substances_types_unique,
+    by = 'VARIABLE',
+    all.x = TRUE,
+    all.y = FALSE
+  )
+unique_locations <-
+  unique(locs_quality[, c('SITE_NO', 'LATITUDE', 'LONGITUDE')])
+unique_locations <- add_border(unique_locations)
+
+
+unique_locations <- unique_locations |>
+  mutate(border_label = recode(Border, `1` = "Canada", `0` = "US"))
+
+
+pal <-
+  colorFactor(palette = "Dark2", domain = unique_locations$border_label)
+
+
+leaflet(data = unique_locations) |>
+  addProviderTiles(providers$CartoDB.Positron)  |>
+  addCircleMarkers(
+    ~ LONGITUDE,
+    ~ LATITUDE,
+    radius = 4.5,
+    color = ~ pal(border_label),
+    stroke = FALSE,
+    fillOpacity = 0.8
+  ) |>
+  addLegend(
+    "bottomright",
+    pal = pal,
+    values = ~ border_label,
+    title = "Country",
+    opacity = 1
+  ) |>
+  
+  addScaleBar(position = "bottomright", options = scaleBarOptions())
+
+```
+
+
+```{r fig.cap="Correlation among modelled variables, including insecticides (red), pesticides (purple), major ions (green), and metals (beige).", echo = FALSE}
+
+final_substances <-
+  wq_type |> dplyr::filter(
+    VARIABLE %in% c(
+      "O,P'-DDE (2,4'-DDE)",
+      "P,P'-DDT (4,4'-DDT)",
+      "MIREX",
+      "ALDRIN",
+      "ENDOSULFAN SULPHATE",
+      "MAGNESIUM TOTAL RECOVERABLE",
+      "POTASSIUM TOTAL RECOVERABLE",
+      "MOLYBDENUM TOTAL RECOVERABLE",
+      "ZINC TOTAL RECOVERABLE"
+    )
+  )
+
+substances_names <- unique(final_substances$VARIABLE)
+final_substances$VARIABLE <-
+  gsub('.TOTAL.*', "", final_substances$VARIABLE)
+final_substances_df <-
+  corr_analysis_final(final_substances, 'FINAL')
+```
+
+
+## Statistical approach
+
+We modeled the concentration of O,P’-DDE in the natural logarithmic scale such that:
+\[Y(s)=X(s)β+Z(s)+ϵ(s)\]
+
+where X(s) is a q-dimensional vector containing the twelve predictors as previously described,  $β$ is a vector of coefficients associated with those variables, $ϵ(s)$ represents the measurement error and follows a normal distribution with zero mean and variance $τ^2$ (nugget effect). The latent spatial effect  Z  follows a zero mean Gaussian process with an exponential spatial covariance structure given by $σ^2$ R  where R is a valid correlation matrix with elements $R_{ij}=exp⁡(-d_{ij})$, where $σ^2$ is the spatial variance,$d_{ij}$ is the distance between observation i and j, and $ϕ$ is the range parameter. 
+
+The model in nimble is defined as follows:
+
+```{r nimble model}
+dde_model <- nimbleCode({
+  for (i in 1:n_obs) {
+    mean_y[i] <- betas[1] +
+      betas[2] * coords[i, 1] +
+      betas[3] * coords[i, 2] +
+      betas[4] * border_dummy[i] +
+      betas[5] * major_ions[i, 1] +
+      betas[6] * major_ions[i, 2] +
+      betas[7] * metals[i, 1] +
+      betas[8] * metals[i, 2] +
+      betas[9] * insects[i, 1] +
+      betas[10] * insects[i, 2] +
+      betas[11] * insects[i, 3] +
+      betas[12] * insects[i, 4]
+    
+  }
+  
+  Sigma_y[1:n_obs, 1:n_obs] <-
+    sigma2 * exp(-dist_matrix[1:n_obs, 1:n_obs] / phi) + tau2 * diag(n_obs)
+  y_log[1:n_obs] ~ dmnorm(mean = mean_y[1:n_obs], cov = Sigma_y[1:n_obs, 1:n_obs])
+  y_fitted[1:n_obs] ~ dmnorm(mean = mean_y[1:n_obs], cov = Sigma_y[1:n_obs, 1:n_obs])
+  y_fitted_exp[1:n_obs] <- exp(y_fitted[1:n_obs])
+  
+  # Prior definition
+  phi ~ dexp(rate = 1 / phi_mean)
+  
+  for (i in 1:n_var) {
+    betas[i]  ~ dnorm(mean = 0, sd = 10)
+  }
+  tau ~ T(dt(mu = 0, tau = 0.1, df = 1), 0,)
+  tau2 <- pow(tau, 2)
+  
+  rho2  ~ dgamma(shape = 2,  scale = 1)
+  sigma2 <- tau2 / rho2
+  
+  
+})
+```
+
+```{r run model dde, echo = FALSE, results='hide'}
+## Extract data of interest
+
+set.seed(122)
+
+substance_of_interest <- "O,P'-DDE (2,4'-DDE)"
+
+substances_spread <- extract_data(substance_of_interest)
+
+substances_spread_border <- add_border(substances_spread)
+
+# Data is transformed into the log scale in this step
+pre_processed_data <-
+  data_preprocessing(substance_of_interest, substances_spread_border)
+
+## Run model
+
+model <- nimbleModel(
+  code = dde_model,
+  data = pre_processed_data[['data']],
+  constants = pre_processed_data[['const']],
+  inits = pre_processed_data[['init']]
+)
+
+Cmodel <- compileNimble(model, showCompilerOutput = TRUE)
+mcmcConf <- configureMCMC(Cmodel,
+                          monitors = c('betas', 'tau2',
+                                       'sigma2', 'phi', 'rho2',
+                                       'y_fitted', 'y_fitted_exp'))
+univariateMCMC <- buildMCMC(mcmcConf)
+CunivariateMCMC  <- compileNimble(univariateMCMC, project = model)
+
+niter <- 50000
+nburnin <- 10000
+nchains <- 3
+thin <- 5
+samples <- runMCMC(
+  mcmc = CunivariateMCMC,
+  niter = niter,
+  nburnin = nburnin,
+  nchains = nchains,
+  thin = thin
+)
+# Get summary
+summary_mcmc <- MCMCsummary(object = samples)
+
+
+```
+
+# Results
+
+```{r fig.cap= "Posterior summary for the fixed-effect coefficients.", fig.align="center", echo = FALSE, fig.width = 8, fig.height= 3}
+# Check fitted values
+betas <-
+  summary_mcmc[grepl('betas\\[\\d+\\]$', rownames(summary_mcmc)),
+               c('mean', '2.5%', '97.5%', 'sd')]
+
+my_colors <-
+  c(
+    'Intercept' = 'black',
+    'Long' = 'black',
+    'Lat' = 'black',
+    'Border' = 'black',
+    'Magnesium' = '#80ad22',
+    'Potassium' = '#80ad22',
+    'Molybdenum' = '#32c0c4',
+    'Zinc' = '#32c0c4',
+    'Mirex' = '#f3746d',
+    'Aldrin' = '#f3746d',
+    "P, P’- DDT" = '#f3746d',
+    'Endosulfan' = '#f3746d'
+  )
+
+betas['variable'] <- c(
+  'Intercept',
+  'Long',
+  'Lat',
+  'Border',
+  'Magnesium',
+  'Potassium',
+  'Molybdenum',
+  'Zinc',
+  'Mirex',
+  'Aldrin',
+  "P, P’- DDT",
+  "Endosulfan"
+)
+
+
+betas['variable'] <- factor(
+  betas$variable,
+  levels = c(
+    'Intercept',
+    'Long',
+    'Lat',
+    'Border',
+    'Magnesium',
+    'Potassium',
+    'Molybdenum',
+    'Zinc',
+    'Mirex',
+    'Aldrin',
+    "P, P’- DDT",
+    "Endosulfan"
+  )
+)
+
+ggplot(data = betas, aes(x = variable, y = mean, color = variable)) +
+  geom_point(aes(x = variable, y = mean), size = 2) +
+  labs(x = "Variable", y = "Posterior summary", color = "Variable") +
+  geom_errorbar(aes(ymin = `2.5%`, ymax = `97.5%`),
+                width = .2,
+                position = position_dodge(0.05)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme_classic() +
+  theme(axis.text.x = element_text(
+    angle = 45,
+    size = 8,
+    vjust = 0.5
+  )) +
+  scale_color_manual(values = my_colors)
+
+```
+
+
+## Entropy based monitoring design
+
+The following function extracts the distance matrix used in the model presented 
+in the previous section and presents the function to calculate the network's entropy.
+
+
+```{r entropy calculation}
+set.seed(123)
+distance_matrix <- pre_processed_data$data$dist_matrix
+
+# Function to compute the entropy
+# In this case we are going to rate the sites based on their entropy
+H_g <- function(dist_mat, mcmc_summ) {
+  # @input dist_mat: distance matrix of tentative sites to add
+  # @input mcmc_summ: summary of the mcmc chains, we are interested in the posterior means
+  # @return Entropy: calculated entropy for the given distance matrix
+  
+  phi_mcmc   <- mcmc_summ["phi", "mean"]
+  sigma_mcmc <- mcmc_summ["sigma2", "mean"]
+  tau_mcmc  <- mcmc_summ["tau2", "mean"]
+  
+  Sigma_sim <-
+    sigma_mcmc * exp(-dist_mat / phi_mcmc) + tau_mcmc * diag(nrow(dist_mat))
+  Entropy <-  (1/2)*log(det(Sigma_sim))
+  return(Entropy)
+}
+
+```
+
+We first used the entropy-based approach to rank sites in order of importance. First, we 
+removed one site at a time and calculated the entropy of the resulting network. 
+Sites whose removal would result in higher entropy, would be ranked as the least 
+important, while sites whose removal would produce minimum entropy would be
+categorized as the most important.
+
+```{r remove one site}
+# Here, we show the indices to choose from
+indices_to_choose <- c(1:nrow(distance_matrix))
+# Then we remove one site at a time and get the corresponding list of indexes
+# of sites that would remain in the network
+
+combination_list <- combn(indices_to_choose, length(indices_to_choose)-1)
+combination_list_rev <- combination_list[,ncol(combination_list):1]
+
+
+H_sites_dde <- c() # Vector of entropies
+
+# Iterate through all possible combination of sites
+for (j in 1:ncol(combination_list)){
+  # Compute the entropy for the tentative combination of sites
+  H_sites_dde[j] <- H_g(distance_matrix[combination_list_rev[,j], combination_list_rev[,j]], summary_mcmc)
+  
+}
+
+# Order entropy
+rank_dde <- order(H_sites_dde, decreasing = TRUE)
+# Technically this is the ranking of the sites, the first ones are the ones with 
+# maximum entropy. So when site 13 is removed, we get the maximum entropy, when
+# we remove site 1, We get the minimum entropy, so site 1 is more important
+# than site 13
+
+rank_dde
+```
+
+
+
+### Ranking Results
+
+```{r fig.cap = "Site importance ranking based on the entropy-based leave-one-out approach. Colors indicate relative importance, with lower entropy (darker colors) representing more critical sites.", echo = FALSE}
+
+
+ranked_sites_dde <- substances_spread[rev(rank_dde), c("SITE_NO", "LONGITUDE", "LATITUDE")]
+  
+ranked_sites_dde[1:12,'Rank_Tier'] <- 'Tier 1'
+ranked_sites_dde[13:24,'Rank_Tier'] <- 'Tier 2'
+ranked_sites_dde[25:36,'Rank_Tier'] <- 'Tier 3'
+ranked_sites_dde[37:47,'Rank_Tier'] <- 'Tier 4'
+
+ranked_sites_dde$Rank_Tier <- as.factor(ranked_sites_dde$Rank_Tier)
+
+ranked_sites_dde$Number <- rev(rank_dde)
+
+
+# Ensure ordered factor levels
+ranked_sites_dde$Rank_Tier <- factor(
+  ranked_sites_dde$Rank_Tier,
+  levels = c("Tier 1", "Tier 2", "Tier 3", "Tier 4"),
+  ordered = TRUE
+)
+
+# Palette for legend and marker colors (returns hex colors)
+pal <- colorFactor(
+  palette = c("red", "orange", "blue", "grey2"),
+  levels  = levels(ranked_sites_dde$Rank_Tier),
+  ordered = TRUE
+)
+
+leaflet(data = ranked_sites_dde, width = 500, height = 800) |>
+  addProviderTiles(providers$CartoDB.Positron) |> 
+  addCircleMarkers(
+    lng         = ~LONGITUDE,
+    lat         = ~LATITUDE,
+    label       = ~as.character(Number),
+    radius      = 3,
+    stroke      = TRUE,
+    weight      = 1,
+    color       = ~pal(Rank_Tier),   # stroke color
+    fillColor   = ~pal(Rank_Tier),   # fill color
+    fillOpacity = 1
+  ) |>
+  addLegend(
+    position = "bottomright",
+    pal      = pal,
+    values   = ~Rank_Tier,
+    title    = "Rank",
+    opacity  = 1
+  )   |> 
+  addScaleBar(position = "bottomleft", options = scaleBarOptions()) 
+```
+
+
+
+
+### Removing multiple sites
+
+Now, let's say we want to reduce the network by five sites. 
+The following code will calculate the entropy of all possible combinations after
+removing five sites at a time.
+
+
+```{r remove five sites}
+# Here, we show the indices to choose from
+indices_to_choose_delete <- c(1:nrow(distance_matrix))
+# Then we remove five sites at a time and get the corresponding list of indexes
+# of sites that would remain in the network
+combination_list <- combn(indices_to_choose, length(indices_to_choose)-5)
+combination_list_rev <- combination_list[,ncol(combination_list):1]
+
+
+H_five_sites_delete_dde <- c() 
+
+# Iterate through all possible combination of sites
+for (j in 1:ncol(combination_list)){
+  # Compute the entropy for the tentative combination of sites
+  H_five_sites_delete_dde[j] <- H_g(distance_matrix[combination_list_rev[,j], combination_list_rev[,j]], summary_mcmc)
+  
+}
+
+# Order entropy
+rank_five_dde <- order(H_five_sites_delete_dde, decreasing = TRUE)
+# In this case, if we remove the first five sites that yield to the max entropy
+# the resulting network would be to use sites: 
+chosen_sites_delete <- combination_list_rev[,rank_five_dde[1]]
+# Start new network
+new_sites_dde <- substances_spread[, c("SITE_NO", "LONGITUDE", "LATITUDE")]
+
+# Colored by site type: Keep, Remove, Add
+new_sites_dde[,'Number'] <- 1:nrow(distance_matrix)
+new_sites_dde[chosen_sites_delete,'Type'] <- 'Keep'
+new_sites_dde[indices_to_choose_delete %notin% chosen_sites_delete,'Type'] <- 'Remove'
+```
+
+And if we wanted to move those sites or add new sites to the monitoring network then we woould do the following
+
+```{r relocating five sites}
+# From the original distance matrix, remove sites labeled as Remove
+reduced_network <- new_sites_dde |> filter(Type == 'Keep')
+reduced_coords <- munge_coordinates(reduced_network)$substance_df |>  
+  dplyr::select(X_km, Y_km)
+# Load tentative sites
+tentative_sites <- read.csv('data/tentative_1k_points.csv')
+tentative_coords <- munge_coordinates(tentative_sites)$substance_df |>  
+  dplyr::select(X_km, Y_km)
+# All combinations of 5 sites
+indices_to_choose_add <- c(1:nrow(tentative_coords))
+# Then we remove five sites at a time and get the corresponding list of indexes
+# of sites that would remain in the network
+tentative_list <- combn(indices_to_choose, 5)
+tentative_list_rev <- tentative_list[,ncol(tentative_list):1]
+# Calculate the entropy
+H_five_sites_add_dde <- c() # Vector of entropies
+
+# Iterate through all possible combination of sites
+for (j in 1:ncol(tentative_list_rev)){
+  # Calculate the distance matrix adding those sites
+  tentative_matrix <- rbind(reduced_coords,tentative_coords[tentative_list_rev[,j],])
+  dist_matrix_add <- dist(tentative_matrix) |> as.matrix()
+  # Compute the entropy for the tentative combination of sites
+  H_five_sites_add_dde[j] <- H_g(dist_matrix_add, summary_mcmc)
+  
+}
+
+# Order entropy
+rank_five_dde_add <- order(H_five_sites_add_dde, decreasing = TRUE)
+# In this case, if we remove the first five sites that yield to the max entropy
+# the resulting network would be to use sites: 
+chosen_sites_add <- tentative_list_rev[,rank_five_dde_add[1]]
+# In this case, it would mean to add sites: 6, 15, 17, 18, and 29
+sites_add <- tentative_sites[chosen_sites_add,c( "LONGITUDE", "LATITUDE")]
+sites_add$SITE_NO <- c('ON06', 'ON15', 'ON17', 'ON18', 'ON29')
+sites_add$Type <- 'Add'
+sites_add$Number <- 0
+```
+
+The following map shows how the resulting network would look like after we remove those sites
+
+```{r fig.cap = "Network configuration after site removal and addition. Original sites retained are shown in one color, removed sites in another, and newly added sites highlighted.", echo=FALSE}
+
+new_sites_dde <- rbind(new_sites_dde, sites_add)
+
+new_sites_dde$Type <- factor(new_sites_dde$Type, 
+                             levels = c("Add", "Keep", "Remove"))
+
+
+pal <- colorFactor(c("blue",  "darkgreen", "grey22"),
+                   domain = levels(new_sites_dde$Type))
+
+
+leaflet(data = new_sites_dde, width = 500, height = 800) |>  
+  addProviderTiles(providers$CartoDB.Positron) |> 
+  addCircleMarkers(
+              lng = ~LONGITUDE, 
+              lat = ~LATITUDE,
+             stroke = TRUE,
+             color = ~pal(Type),
+             fillColor = ~pal(Type),
+             weight = 1,
+             fillOpacity = 1,
+             group = "Type",
+             labelOptions = labelOptions(noHide = TRUE, 
+                                          textOnly = TRUE,
+                                         textsize = "12px"),
+             radius= 3) |> 
+  addLegend(
+    "bottomright", 
+    pal = pal, 
+    values = ~Type, 
+    title = "Type",
+    opacity = 1
+  )  |> 
+  addScaleBar(position = "bottomleft", options = scaleBarOptions()) 
+
+```
+
+
+# Supplementary Material
+
+Finally, these are the figures in the supplementary material of the original article.
+
+```{r fig.cap= "Summary of modelled substances. a) Concentration of insecticides, pesticides, major ions and metals (log scale, boxplots).", echo = FALSE, fig.width = 5, fig.height= 6}
+boxplot_df <- final_substances
+boxplot_df$VARIABLE  <- str_to_title(boxplot_df$VARIABLE)
+boxplot_df$VARIABLE_TYPE <- str_to_title(boxplot_df$VARIABLE_TYPE)
+
+# Reorder VARIABLE so substances are grouped by VARIABLE_TYPE
+boxplot_df <- boxplot_df  |> 
+  mutate(VARIABLE = forcats::fct_reorder(VARIABLE, as.numeric(factor(VARIABLE_TYPE))))
+
+
+ggplot(boxplot_df, aes(x = VARIABLE, y = log(VALUE_VALEUR))) +
+  geom_boxplot(aes(fill = VARIABLE_TYPE)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(y = "Concentration (log scale)", x = "Substance", fill = "Type") 
+
+```
+
+
+```{r fig.cap="O,P'-DDE (2,4'-DDE) concentration in NG/G DWT across some locations close to St Claire River.", echo = FALSE}
+size_mult <- 3
+dde <-
+  final_substances[final_substances$VARIABLE == "O,P'-DDE (2,4'-DDE)",]
+
+leaflet(data = dde) |>  addProviderTiles(providers$CartoDB.Positron) |>
+  addCircleMarkers(
+    lng = ~ LONGITUDE,
+    lat = ~ LATITUDE,
+    fillOpacity = 0.8,
+    weight = 1,
+    group = "O,P'-DDE (2,4'-DDE)",
+    radius =  ~ sqrt(VALUE_VALEUR) * size_mult,
+  ) 
+```
+```{r fig.cap="Trace plots for key parameters of the geostatistical model, including spatial variance (σ²), nugget variance (τ²), spatial range (ϕ), and the first three regression coefficients (β₁–β12).", echo = FALSE}
+
+# Check convergence 
+MCMCtrace(
+  params = c('sigma2', 'tau2', 'phi', 'betas[1]','betas[2]', 'betas[3]', 
+  'betas[4]','betas[5]', 'betas[6]', 'betas[7]','betas[8]', 'betas[9]', 
+  'betas[10]'),
+  object = samples,
+  ISB = FALSE,
+  pdf = FALSE,
+  ind = TRUE,
+  Rhat = TRUE,
+  n.eff = TRUE)
+```
+
+
+```{r fig.cap="Observed versus fitted log-transformed DDE concentrations at each of the 47 sampling sites. Black solid circles represent the posterior mean of the fitted values from the geostatistical model, red solid circles represent the observed values, and vertical bars indicate 95% posterior credible intervals. This visualization assesses how well the model captures site-level spatial and environmental variation.", fig.align="center", echo = FALSE, fig.width = 8, fig.height= 3}
+# Check fitted values
+fitted_values <-
+  summary_mcmc[grepl('^y_fitted\\[', rownames(summary_mcmc)),
+               c('mean', '2.5%', '97.5%')]
+fitted_values_exp <-
+  summary_mcmc[grepl('y_fitted_exp*', rownames(summary_mcmc)),
+               c('mean', '2.5%', '97.5%', 'sd')]
+
+fitted_values['true_values'] <- pre_processed_data[['data']]$y_log
+fitted_values['variable'] <- factor(rownames(fitted_values),
+                                    levels = rownames(fitted_values))
+
+
+ggplot(data = fitted_values, aes(x = variable, y = mean)) +
+  geom_point(aes(x = variable, y = true_values),
+             color = 'red',
+             size = 2) +
+  geom_point(aes(x = variable, y = mean), size = 2) +
+  labs(x = "Site number", y = "Posterior summary") +
+  geom_errorbar(aes(ymin = `2.5%`, ymax = `97.5%`),
+                width = .2,
+                position = position_dodge(0.05)) +
+  scale_x_discrete(labels = 1:47) +
+  theme_classic() +
+  theme(axis.text.x = element_text(
+    angle = 45,
+    size = 8,
+    vjust = 0.05
+  )) 
+ 
+```
+
+```{r fig.cap="Posterior mean (b) and standard deviation (c) for the p,p’-DDE concentrations (NG/G DWT) across observed sites based on the Bayesian spatial model, with point color and size proportional to predicted values", fig.align="center", echo = FALSE }
+fitted_df <-
+  substances_spread[, c("O,P'-DDE (2,4'-DDE)", "LONGITUDE", "LATITUDE")]
+fitted_df[, c('log_y')] <- log(fitted_df$`O,P'-DDE (2,4'-DDE)`)
+fitted_df$fitted_mean <- fitted_values_exp$mean
+fitted_df$fitted_sd <- fitted_values_exp$sd
+
+range_values <- range(fitted_df$fitted_sd)
+# Define bins based on the range of values
+
+mybins <-
+  c(seq(min(fitted_df$fitted_mean), range_values[2], length.out = 5))
+
+mypalette_mean <- colorBin(
+  palette = "inferno",
+  domain = mybins,
+  na.color = "transparent",
+  bins = mybins
+)
+
+leaflet(fitted_df, width = 500, height = 800)  |>
+  addProviderTiles(providers$CartoDB.Positron)  |>
+  addCircleMarkers(
+    ~ LONGITUDE ,
+    ~ LATITUDE ,
+    fillOpacity = 0.7,
+    color = "orange",
+    fillColor = ~ mypalette_mean(fitted_mean),
+    radius = 5,
+    stroke = FALSE,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) |>
+  addControl(html = "<h2>Posterior mean</h2>", position = "bottomleft") |>
+  addLegend(
+    pal = mypalette_mean,
+    values =  ~ fitted_mean,
+    opacity = 0.9,
+    title =  "p,p'-dde (2,4'-dde) NG/G",
+    position = "bottomright"
+  )
+
+
+# Standard Deviation Map
+
+name_sd_plot = "p,p'-dde (2,4'-dde) NG/G sd"
+
+leaflet(fitted_df, width = 500, height = 800)  |>
+  addProviderTiles(providers$CartoDB.Positron)  |>
+  addCircleMarkers(
+    ~ LONGITUDE ,
+    ~ LATITUDE ,
+    fillOpacity = 0.7,
+    color = "orange",
+    fillColor = ~ mypalette_mean(fitted_sd),
+    radius = 5,
+    stroke = FALSE,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto",
+    )
+  ) |> addControl(html = "<h2>Posterior sd</h2>", position = "bottomleft") |>
+  addLegend(
+    pal = mypalette_mean,
+    values =  ~ fitted_sd,
+    opacity = 0.9,
+    title =  "p,p'-dde (2,4'-dde) NG/G",
+    position = "bottomright"
+  ) 
+
+```
+
+
+
+
+```{r fig.cap="Entropy comparison using the full network as baseline vs recalculating the parameters after dropping one site at a time.", echo = FALSE,}
+worst_ten <- head(rank_dde,10)
+top_ten <- tail(rank_dde,10)
+other_sites <- rank_dde[rank_dde %notin% worst_ten & rank_dde %notin% top_ten ]
+H_g_removed <- function(site, type) {
+  # @input dist_mat: distance matrix of tentative sites to add
+  # @input mcmc_summ: summary of the mcmc chains, we are interested in the posterior means
+  # @return Entropy: calculated entropy for the given distance matrix
+  
+  read_sample <- readRDS(paste0('output/', type,'_removed_', site,'.rds'))
+  summary_mcmc <- MCMCsummary(object = read_sample)
+  
+  dist_mat <- distance_matrix[-site, -site]
+  
+  phi_mcmc <- summary_mcmc["phi", "mean"] # Posterior mean for parameter phi
+  sigma_mcmc <- summary_mcmc["sigma2", "mean"] # Posterior mean for parameter sigma
+  tau_mcmc <- summary_mcmc["tau2", "mean"] # Posterior mean for nugget effect tau
+  
+  Sigma_sim <-
+    (sigma_mcmc * exp(-dist_mat / phi_mcmc)) + tau_mcmc * diag(nrow(dist_mat))
+  Entropy <-  (1/2)*log(det(Sigma_sim))
+  return(Entropy)
+}
+
+
+top_entropies <- mapply(H_g_removed, top_ten, 'top')
+worst_entropies <- mapply(H_g_removed, worst_ten, 'worst')
+other_entropies <- mapply(H_g_removed, other_sites, 'others')
+
+site_wise_entropies <- data.frame(
+  sites = as.factor(c(worst_ten, other_sites, top_ten)),
+  entropy = c(worst_entropies, other_entropies, top_entropies),
+  type = 'Leave one out'
+)
+
+site_wise_entropies$norm_entropy <- site_wise_entropies$entropy - min(site_wise_entropies$entropy)
+
+# Entropy plot
+
+sites_entropy <- data.frame(
+  sites = as.factor(rank_dde), # Start with the vector in the desired order
+  entropy = sort(H_sites_dde, decreasing = TRUE), # not one of my best practices but this is only valid because rank_dde is sorted based on H_g
+  type = 'Full Network'
+)
+sites_entropy$norm_entropy <-  sites_entropy$entropy - min(sites_entropy$entropy)
+sites_entropy_sorted <- sites_entropy  |> 
+  arrange(norm_entropy)
+all_entropies <- rbind(sites_entropy_sorted, site_wise_entropies)
+
+ggplot(data = all_entropies) + 
+  geom_point(aes(x = fct_inorder(sites), y = entropy, color = type)) +
+  labs(x = "Sites (Ordered by Rank)", y = 'Entropy', 
+       color = 'Model Type') + 
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, size = 7, vjust = 0.05), 
+        text = element_text(size = 10))
+```
+
+
+```{r fig.cap = "Information loss calculated as Hfull – H-j with sites ordered by importance, i.e. sites 1 and 38 would cause the highest loss of information if dropped.", echo = FALSE}
+H_full <- H_g(distance_matrix, summary_mcmc)
+
+importance_df <- data.frame(
+  site = as.factor(indices_to_choose),
+  # H_sites_dde contains the entropy values for N-1 sites from your loop
+  # Information Loss = Total Entropy - Reduced Entropy
+  info_loss = H_full - H_sites_dde 
+)
+
+importance_df <- importance_df  |> 
+  arrange(desc(info_loss))
+
+
+
+ggplot(data = importance_df, aes(x = fct_inorder(site), y = info_loss, group = 1)) + 
+  geom_line(color = "grey70", linetype = "dashed") + # Adds the 'curve' feel
+  geom_point(size = 2, color = "#2c3e50") +
+  labs(
+    x = "Site ID (Ordered by Importance)", 
+    y = "Information Loss (Entropy Drop)",
+    title = "Site Importance Ranking"
+  ) + 
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, size = 8, vjust = 0.5))
+
+```
+
+
+
+
+```{r fig.cap="Posterior mean (solid circles) and 95% Credible Intervals (CI) for the spatial decay parameter (ϕ), spatial variance (σ^2) and nugget effect (τ^2) across different network scenarios. This plot evaluates the robustness of the model by comparing the full network against models with high-influence and redundant sites removed.", echo = FALSE}
+# Function to get summary stats from a saved MCMC sample
+extract_params <- function(file_path, group_name) {
+  samples <- readRDS(file_path)
+  summ <- MCMCsummary(samples, params = c('phi', 'sigma2', 'tau2'))
+  summ$parameter <- rownames(summ)
+  summ$group <- group_name
+  return(summ)
+}
+
+# Example of comparing the Full Model vs Top 10 Removed vs Worst 10 Removed
+# (You would adjust the paths to your actual RDS files)
+all_comparisons <- bind_rows(
+  extract_params("output/full_model.rds", "Full Network"),
+  extract_params("output/top_removed_1.rds", "Important Site Removed"),
+  extract_params("output/worst_removed_13.rds", "Redundant Site Removed")
+)
+
+# Plotting the shift in Phi (Spatial Range)
+
+# Create a naming vector for the facets with Greek symbols
+label_names <- c(
+  "phi"    = "phi",
+  "sigma2" = "sigma^2",
+  "tau2"   = "tau^2"
+)
+
+ggplot(all_comparisons, 
+       aes(x = group, y = mean, ymin = `2.5%`, ymax = `97.5%`)) +
+  geom_pointrange() +
+  facet_wrap(~parameter, ncol = 2, scales = "free_y", 
+             labeller = labeller(parameter = as_labeller(label_names, default = label_parsed))) +
+  labs(y = "Posterior Mean and 95% CI", x = "") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 35, size = 8, vjust = 0.6))
+```
+
+
+
+
+
+
+```{r fig.cap="Sites colored by order of importance based on the entropy-based approach for site ranking. Sites on the red color of the spectrum mean highly informative sites while sites toward the blue color are less informative.", echo = FALSE}
+
+ranked_sites_dde$Importance <- 1:nrow(ranked_sites_dde) # Add importance index
+pal <- colorNumeric(
+  palette = "RdBu", # Yellow-Orange-Red gradient
+  domain = ranked_sites_dde$Importance
+)
+leaflet(data = ranked_sites_dde) |> 
+  addProviderTiles(providers$CartoDB.Positron) |> 
+  addCircleMarkers(
+    lng = ~LONGITUDE, 
+    lat = ~LATITUDE,
+    color = ~pal(Importance),
+    fillOpacity = 0.8,
+    radius = 3 # Increased radius for better visibility of color
+  ) |>
+  addLabelOnlyMarkers(
+  lng = ~LONGITUDE, 
+  lat = ~LATITUDE,
+  label = ~as.character(Number), 
+  
+  labelOptions = labelOptions(
+    noHide = TRUE, 
+    # Try 'auto' to let Leaflet pick the best position, or 'bottom'/'top'
+    direction = 'auto', 
+    textOnly = TRUE,         
+    style = list(
+      "font-weight" = "bold", 
+      "padding" = "10px",
+      "font-size" = "14px"
+    )
+  )
+)|>
+  addLegend(
+    pal = pal, 
+    values = ~Importance,
+    title = "Importance Level"
+  )
+```
+
+# References
+
+- Ainslie, B., Reuten, C., Steyn, D. G., Le, N. D., & Zidek, J. V. (2009). Application of an entropy-based Bayesian optimization technique to the redesign of an existing monitoring network for single air pollutants. Journal of Environmental Monitoring, 11(5), 1037–1043. https://doi.org/10.1039/b900658b
+
+
+- Le, N. D., & Zidek, J. V. (2006). Statistical Analysis of Environmental Space–Time Processes. Springer Series in Statistics. Springer. https://doi.org/10.1007/0-387-30160-0
+
+
