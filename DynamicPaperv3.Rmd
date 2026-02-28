@@ -200,11 +200,8 @@ dde_model <- nimbleCode({
 })
 ```
 
-```{r run model dde, echo = FALSE, results='hide'}
-## Extract data of interest
 
-set.seed(122)
-
+```{r preprocess data, echo = FALSE, results='hide'}
 substance_of_interest <- "O,P'-DDE (2,4'-DDE)"
 
 substances_spread <- extract_data(substance_of_interest)
@@ -214,6 +211,16 @@ substances_spread_border <- add_border(substances_spread)
 # Data is transformed into the log scale in this step
 pre_processed_data <-
   data_preprocessing(substance_of_interest, substances_spread_border)
+
+```
+
+```{r run model dde, echo = FALSE, eval = FALSE}
+# This part won't run in the book, the output has already been saved in the output folder
+# so that the book compiles faster
+
+## Extract data of interest
+
+set.seed(122)
 
 ## Run model
 
@@ -244,8 +251,15 @@ samples <- runMCMC(
   thin = thin
 )
 # Get summary
-summary_mcmc <- MCMCsummary(object = samples)
 
+saveRDS(samples, 'output/samples.rds')
+
+```
+
+```{r read results, echo = FALSE}
+
+samples <- readRDS('output/samples.rds')
+summary_mcmc <- MCMCsummary(object = samples)
 
 ```
 
@@ -464,6 +478,9 @@ combination_list <- combn(indices_to_choose, length(indices_to_choose)-5)
 combination_list_rev <- combination_list[,ncol(combination_list):1]
 
 
+```
+
+```{r run entropy, eval = FALSE}
 H_five_sites_delete_dde <- c() 
 
 # Iterate through all possible combination of sites
@@ -473,7 +490,16 @@ for (j in 1:ncol(combination_list)){
   
 }
 
+# Save output to avoid running it every time we run the book
+
+saveRDS(H_five_sites_delete_dde, "output/H_five_sites_delete_dde.rds")
+
+```
+
+
+```{r}
 # Order entropy
+H_five_sites_delete_dde <- readRDS("output/H_five_sites_delete_dde.rds")
 rank_five_dde <- order(H_five_sites_delete_dde, decreasing = TRUE)
 # In this case, if we remove the first five sites that yield to the max entropy
 # the resulting network would be to use sites: 
@@ -487,9 +513,9 @@ new_sites_dde[chosen_sites_delete,'Type'] <- 'Keep'
 new_sites_dde[indices_to_choose_delete %notin% chosen_sites_delete,'Type'] <- 'Remove'
 ```
 
-And if we wanted to move those sites or add new sites to the monitoring network then we woould do the following
+And if we wanted to move those sites or add new sites to the monitoring network then we would do the following
 
-```{r relocating five sites}
+```{r relocating five sites add}
 # From the original distance matrix, remove sites labeled as Remove
 reduced_network <- new_sites_dde |> filter(Type == 'Keep')
 reduced_coords <- munge_coordinates(reduced_network)$substance_df |>  
@@ -504,6 +530,11 @@ indices_to_choose_add <- c(1:nrow(tentative_coords))
 # of sites that would remain in the network
 tentative_list <- combn(indices_to_choose, 5)
 tentative_list_rev <- tentative_list[,ncol(tentative_list):1]
+```
+
+
+```{r relocating five sites entropy add, eval = FALSE}
+
 # Calculate the entropy
 H_five_sites_add_dde <- c() # Vector of entropies
 
@@ -517,6 +548,12 @@ for (j in 1:ncol(tentative_list_rev)){
   
 }
 
+saveRDS(H_five_sites_add_dde, 'output/H_five_sites_add_dde.rds')
+```
+
+```{r order add sites}
+
+H_five_sites_add_dde <- readRDS('output/H_five_sites_add_dde.rds')
 # Order entropy
 rank_five_dde_add <- order(H_five_sites_add_dde, decreasing = TRUE)
 # In this case, if we remove the first five sites that yield to the max entropy
@@ -528,6 +565,7 @@ sites_add$SITE_NO <- c('ON06', 'ON15', 'ON17', 'ON18', 'ON29')
 sites_add$Type <- 'Add'
 sites_add$Number <- 0
 ```
+
 
 The following map shows how the resulting network would look like after we remove those sites
 
@@ -608,6 +646,9 @@ leaflet(data = dde) |>  addProviderTiles(providers$CartoDB.Positron) |>
     radius =  ~ sqrt(VALUE_VALEUR) * size_mult,
   ) 
 ```
+
+
+
 ```{r fig.cap="Trace plots for key parameters of the geostatistical model, including spatial variance (σ²), nugget variance (τ²), spatial range (ϕ), and the first three regression coefficients (β₁–β12).", echo = FALSE}
 
 # Check convergence 
@@ -796,30 +837,64 @@ ggplot(data = all_entropies) +
 
 
 ```{r fig.cap = "Information loss calculated as Hfull – H-j with sites ordered by importance, i.e. sites 1 and 38 would cause the highest loss of information if dropped.", echo = FALSE}
-H_full <- H_g(distance_matrix, summary_mcmc)
 
-importance_df <- data.frame(
-  site = as.factor(indices_to_choose),
-  # H_sites_dde contains the entropy values for N-1 sites from your loop
-  # Information Loss = Total Entropy - Reduced Entropy
-  info_loss = H_full - H_sites_dde 
+delta <- H_sites_dde - min(H_sites_dde)
+ 
+inflation_factor <- exp(2 * delta)
+ 
+inflation_df <- data.frame(
+  Site = factor(1:length(H_sites_dde)),
+  Inflation = inflation_factor
 )
-
-importance_df <- importance_df  |> 
-  arrange(desc(info_loss))
-
-
-
-ggplot(data = importance_df, aes(x = fct_inorder(site), y = info_loss, group = 1)) + 
-  geom_line(color = "grey70", linetype = "dashed") + # Adds the 'curve' feel
-  geom_point(size = 2, color = "#2c3e50") +
+ 
+inflation_df <- inflation_df |>
+  dplyr::arrange(desc(Inflation))
+ 
+inflation_df$Site <- factor(inflation_df$Site,
+                            levels = inflation_df$Site)
+ 
+inflation_df$InflationPct <- (inflation_df$Inflation - 1) * 100
+ 
+inflation_df <- inflation_df |>
+  dplyr::arrange(Inflation)   # smallest = most important
+ 
+inflation_df$Rank_Tier <- NA
+ 
+inflation_df$Rank_Tier[1:12]   <- "Tier 1"
+inflation_df$Rank_Tier[13:24]  <- "Tier 2"
+inflation_df$Rank_Tier[25:36]  <- "Tier 3"
+inflation_df$Rank_Tier[37:47]  <- "Tier 4"
+ 
+inflation_df$Rank_Tier <- factor(
+  inflation_df$Rank_Tier,
+  levels = c("Tier 1","Tier 2","Tier 3","Tier 4"),
+  ordered = TRUE
+)
+ 
+inflation_df$Site <- factor(inflation_df$Site,
+                            levels = inflation_df$Site)
+ 
+ggplot(inflation_df, aes(x = Site, y = InflationPct, colour = Rank_Tier, group = 1)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_line(linetype = "dashed", colour = "grey75") +
+  geom_point(size = 2.5) +
   labs(
-    x = "Site ID (Ordered by Importance)", 
-    y = "Information Loss (Entropy Drop)",
-    title = "Site Importance Ranking"
-  ) + 
+    x = "Removed Site",
+    y = "Relative Uncertainty Increase (%)",
+    title = "Relative Site Redundancy in Network Information"
+  ) +
+  scale_colour_manual(values = c(
+    "Tier 1" = "firebrick",
+    "Tier 2" = "darkorange",
+    "Tier 3" = "steelblue",
+    "Tier 4" = "grey2"
+  )) +
   theme_classic() +
-  theme(axis.text.x = element_text(angle = 45, size = 8, vjust = 0.5))
+  theme(
+    axis.text.x = element_text(angle = 45, size = 8),
+    legend.position = "right"
+  )
+
 
 ```
 
